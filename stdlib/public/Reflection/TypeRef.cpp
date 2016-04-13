@@ -49,13 +49,9 @@ class PrintTypeRef : public TypeRefVisitor<PrintTypeRef, void> {
   void printRec(const TypeRef *typeRef) {
     OS << "\n";
 
-    if (typeRef == nullptr)
-      OS << "<<null>>";
-    else {
-      Indent += 2;
-      visit(typeRef);
-      Indent -=2;
-    }
+    Indent += 2;
+    visit(typeRef);
+    Indent -= 2;
   }
 
 public:
@@ -174,6 +170,24 @@ public:
     OS << ')';
   }
 
+  void visitUnownedStorageTypeRef(const UnownedStorageTypeRef *US) {
+    printHeader("unowned-storage");
+    printRec(US->getType().get());
+    OS << ')';
+  }
+
+  void visitWeakStorageTypeRef(const WeakStorageTypeRef *WS) {
+    printHeader("weak-storage");
+    printRec(WS->getType().get());
+    OS << ')';
+  }
+
+  void visitUnmanagedStorageTypeRef(const UnmanagedStorageTypeRef *US) {
+    printHeader("weak-storage");
+    printRec(US->getType().get());
+    OS << ')';
+  }
+
   void visitOpaqueTypeRef(const OpaqueTypeRef *O) {
     printHeader("opaque");
     OS << ')';
@@ -253,16 +267,28 @@ struct TypeRefIsConcrete
     return true;
   }
   
-  bool visitOpaqueTypeRef(const OpaqueTypeRef *Op) {
+  bool visitOpaqueTypeRef(const OpaqueTypeRef *OP) {
     return true;
+  }
+
+  bool visitUnownedStorageTypeRef(const UnownedStorageTypeRef *US) {
+    return visit(US->getType().get());
+  }
+
+  bool visitWeakStorageTypeRef(const WeakStorageTypeRef *WS) {
+    return visit(WS->getType().get());
+  }
+
+  bool visitUnmanagedStorageTypeRef(const UnmanagedStorageTypeRef *US) {
+    return visit(US->getType().get());
   }
 };
 
 const std::shared_ptr<ForeignClassTypeRef>
-ForeignClassTypeRef::Unnamed = std::make_shared<ForeignClassTypeRef>("");
+ForeignClassTypeRef::Unnamed = ForeignClassTypeRef::create("");
 
 const std::shared_ptr<ObjCClassTypeRef>
-ObjCClassTypeRef::Unnamed = std::make_shared<ObjCClassTypeRef>("");
+ObjCClassTypeRef::Unnamed = ObjCClassTypeRef::create("");
 
 const std::shared_ptr<OpaqueTypeRef>
 OpaqueTypeRef::Opaque = std::make_shared<OpaqueTypeRef>();
@@ -291,9 +317,12 @@ TypeRefPointer TypeRef::fromDemangleNode(Demangle::NodePointer Node) {
       auto mangledName = Demangle::mangleNode(Node->getChild(0));
       auto genericArgs = Node->getChild(1);
       TypeRefVector Args;
-      for (auto genericArg : *genericArgs)
-        if (auto ParamTypeRef = fromDemangleNode(genericArg))
-          Args.push_back(ParamTypeRef);
+      for (auto genericArg : *genericArgs) {
+        auto paramTypeRef = fromDemangleNode(genericArg);
+        if (!paramTypeRef)
+          return nullptr;
+        Args.push_back(paramTypeRef);
+      }
 
       return BoundGenericTypeRef::create(mangledName, Args);
     }
@@ -309,10 +338,14 @@ TypeRefPointer TypeRef::fromDemangleNode(Demangle::NodePointer Node) {
     }
     case NodeKind::ExistentialMetatype: {
       auto instance = fromDemangleNode(Node->getChild(0));
+      if (!instance)
+        return nullptr;
       return ExistentialMetatypeTypeRef::create(instance);
     }
     case NodeKind::Metatype: {
       auto instance = fromDemangleNode(Node->getChild(0));
+      if (!instance)
+        return nullptr;
       return MetatypeTypeRef::create(instance);
     }
     case NodeKind::ProtocolList: {
@@ -342,37 +375,71 @@ TypeRefPointer TypeRef::fromDemangleNode(Demangle::NodePointer Node) {
     case NodeKind::FunctionType: {
       TypeRefVector arguments;
       auto input = fromDemangleNode(Node->getChild(0));
+      if (!input)
+        return nullptr;
       if (auto tuple = dyn_cast<TupleTypeRef>(input.get()))
         arguments = tuple->getElements();
       else
         arguments = { input };
       auto result = fromDemangleNode(Node->getChild(1));
+      if (!result)
+        return nullptr;
       return FunctionTypeRef::create(arguments, result);
     }
     case NodeKind::ArgumentTuple:
       return fromDemangleNode(Node->getChild(0));
     case NodeKind::ReturnType:
       return fromDemangleNode(Node->getChild(0));
-    case NodeKind::NonVariadicTuple: {
+    case NodeKind::NonVariadicTuple:
+    case NodeKind::VariadicTuple: {
       TypeRefVector Elements;
-      for (auto element : *Node)
-        Elements.push_back(fromDemangleNode(element));
-      return TupleTypeRef::create(Elements);
+      for (auto element : *Node) {
+        auto elementType = fromDemangleNode(element);
+        if (!elementType)
+          return nullptr;
+        Elements.push_back(elementType);
+      }
+      bool Variadic = (Node->getKind() == NodeKind::VariadicTuple);
+      return TupleTypeRef::create(Elements, Variadic);
     }
     case NodeKind::TupleElement:
+      if (Node->getChild(0)->getKind() == NodeKind::TupleElementName)
+        return fromDemangleNode(Node->getChild(1));
       return fromDemangleNode(Node->getChild(0));
     case NodeKind::DependentGenericType: {
       return fromDemangleNode(Node->getChild(1));
     }
     case NodeKind::DependentMemberType: {
       auto base = fromDemangleNode(Node->getChild(0));
+      if (!base)
+        return nullptr;
       auto member = Node->getChild(1)->getText();
       auto protocol = fromDemangleNode(Node->getChild(1));
-      cast<ProtocolTypeRef>(protocol.get());
+      if (!protocol)
+        return nullptr;
+      assert(llvm::isa<ProtocolTypeRef>(protocol.get()));
       return DependentMemberTypeRef::create(member, base, protocol);
     }
     case NodeKind::DependentAssociatedTypeRef:
       return fromDemangleNode(Node->getChild(0));
+    case NodeKind::Unowned: {
+      auto base = fromDemangleNode(Node->getChild(0));
+      if (!base)
+        return nullptr;
+      return UnownedStorageTypeRef::create(base);
+    }
+    case NodeKind::Unmanaged: {
+      auto base = fromDemangleNode(Node->getChild(0));
+      if (!base)
+        return nullptr;
+      return UnmanagedStorageTypeRef::create(base);
+    }
+    case NodeKind::Weak: {
+      auto base = fromDemangleNode(Node->getChild(0));
+      if (!base)
+        return nullptr;
+      return WeakStorageTypeRef::create(base);
+    }
     default:
       return nullptr;
   }
@@ -382,33 +449,17 @@ bool TypeRef::isConcrete() const {
   return TypeRefIsConcrete().visit(this);
 }
 
-static unsigned _getDepth(TypeRef *TR) {
-  switch (TR->getKind()) {
-  case TypeRefKind::Nominal: {
-    auto Nom = cast<NominalTypeRef>(TR);
-    return Nom->getDepth();
-    break;
+unsigned NominalTypeTrait::getDepth() const {
+  if (auto P = Parent.get()) {
+    switch (P->getKind()) {
+    case TypeRefKind::Nominal:
+      return 1 + cast<NominalTypeRef>(P)->getDepth();
+    case TypeRefKind::BoundGeneric:
+      return 1 + cast<BoundGenericTypeRef>(P)->getDepth();
+    default:
+      assert(false && "Asked for depth on non-nominal typeref");
+    }
   }
-  case TypeRefKind::BoundGeneric: {
-    auto BG = cast<BoundGenericTypeRef>(TR);
-    return BG->getDepth();
-    break;
-  }
-  default:
-    assert(false && "Asked for depth on non-nominal typeref");
-  }
-}
-
-unsigned NominalTypeRef::getDepth() const {
-  if (auto P = Parent.get())
-    return 1 + _getDepth(P);
-
-  return 0;
-}
-
-unsigned BoundGenericTypeRef::getDepth() const {
-  if (auto P = Parent.get())
-    return 1 + _getDepth(P);
 
   return 0;
 }

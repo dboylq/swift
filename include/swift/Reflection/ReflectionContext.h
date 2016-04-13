@@ -111,11 +111,16 @@ class ReflectionContext {
   void dumpTypeRef(const std::string &MangledName,
                    std::ostream &OS, bool printTypeName = false) const {
     auto TypeName = Demangle::demangleTypeAsString(MangledName);
+    OS << TypeName << std::endl;
+
     auto DemangleTree = Demangle::demangleTypeAsNode(MangledName);
     auto TR = TypeRef::fromDemangleNode(DemangleTree);
-    OS << TypeName << '\n';
+    if (!TR) {
+      OS << "!!! Invalid typeref: " << MangledName << std::endl;
+      return;
+    }
     TR->dump(OS);
-    std::cout << std::endl;
+    OS << std::endl;
   }
 
   template <typename M>
@@ -171,10 +176,10 @@ public:
       for (const auto &descriptor : sections.fieldmd) {
         auto TypeName
           = Demangle::demangleTypeAsString(descriptor.getMangledTypeName());
-        OS << TypeName << "\n";
+        OS << TypeName << std::endl;
         for (size_t i = 0; i < TypeName.size(); ++i)
           OS << '-';
-        OS << "\n";
+        OS << std::endl;
         for (auto &field : descriptor) {
           OS << field.getFieldName() << ": ";
           dumpTypeRef(field.getMangledTypeName(), OS);
@@ -203,11 +208,11 @@ public:
   }
 
   void dumpAllSections(std::ostream &OS) const {
-    OS << "FIELDS:\n";
+    OS << "FIELDS:" << std::endl;
     for (size_t i = 0; i < 7; ++i) OS << '=';
     OS << std::endl;
     dumpFieldSection(OS);
-    OS << "\nASSOCIATED TYPES:\n";
+    OS << "\nASSOCIATED TYPES:" << std::endl;
     for (size_t i = 0; i < 17; ++i) OS << '=';
     OS << std::endl;
     dumpAssociatedTypeSection(OS);
